@@ -11220,6 +11220,70 @@ void test_fake_backspace_and_coreldraw_compatibility() {
                     "A host with a working marker never arms the replay guard");
     }
 
+    // The paced queue in MuMu sends a run of replayed keys at once - a Left and
+    // an Enter pressed while a rewrite waited out its gap. Keeping only the
+    // last one let the Left come back looking like the user's.
+    {
+        vn_ime::SyntheticEditEchoState run;
+        run.marker_unreliable = true;
+        const ULONGLONG t = 1000000;
+        run.BeginNativeKey(VK_LEFT, t);
+        run.BeginNativeKey(VK_RETURN, t);
+        assert_true(run.pending_native_keys == 2,
+                    "Two replayed keys in flight are both held");
+        assert_true(run.Consume(VK_LEFT, 1, t + 1),
+                    "The first replayed key is still recognised after the second was sent");
+        assert_true(run.Consume(VK_RETURN, 2, t + 2),
+                    "So is the second");
+        assert_true(!run.Consume(VK_LEFT, 3, t + 60),
+                    "The next Left belongs to the user");
+
+        run.BeginNativeKey(VK_RETURN, t + 1000);
+        run.BeginNativeKey(VK_LEFT, t + 1000);
+        assert_true(run.Consume(VK_LEFT, 4, t + 1001) &&
+                        run.Consume(VK_RETURN, 5, t + 1002),
+                    "Replayed keys may come back in either order");
+
+        vn_ime::SyntheticEditEchoState full;
+        for (size_t i = 0; i <= vn_ime::SyntheticEditEchoState::kMaxPendingNativeKeys; ++i) {
+            full.BeginNativeKey('A' + static_cast<WPARAM>(i), t);
+        }
+        assert_true(full.pending_native_keys ==
+                        vn_ime::SyntheticEditEchoState::kMaxPendingNativeKeys,
+                    "A run longer than the list keeps the list's length");
+        assert_true(!full.Consume('A', 1, t) && full.Consume('B', 2, t),
+                    "It drops the oldest key, not the newest");
+    }
+
+    // A SendInput call that delivers only part of a burst: the keys that never
+    // went out will never come back, so they come off the guard.
+    {
+        vn_ime::SyntheticEditEchoState partial;
+        partial.marker_unreliable = true;
+        const ULONGLONG t = 1000000;
+        partial.Begin(2, 3, t);
+        partial.Forget(1, 3);
+        assert_true(partial.pending_backspaces == 1 && partial.pending_chars == 0,
+                    "Forget takes back the undelivered keys");
+        assert_true(partial.Consume(VK_BACK, 1, t + 1),
+                    "The delivered Backspace is still recognised");
+        assert_true(!partial.IsPending(t + 1),
+                    "Nothing is left waiting once the delivered keys are back");
+        assert_true(!partial.Consume(VK_BACK, 2, t + 60),
+                    "The user's next Backspace is the user's");
+
+        partial.BeginNativeKey(VK_LEFT, t + 1000);
+        partial.BeginNativeKey(VK_RETURN, t + 1000);
+        partial.ForgetNativeKey(VK_RETURN);
+        assert_true(partial.pending_native_keys == 1 &&
+                        !partial.Consume(VK_RETURN, 3, t + 1001) &&
+                        partial.Consume(VK_LEFT, 4, t + 1002),
+                    "ForgetNativeKey takes back only the key that was not sent");
+        partial.Forget(5, 5);
+        assert_true(!partial.IsPending(t + 1002),
+                    "Forgetting more than is pending leaves nothing pending");
+    }
+
     // 7. The echo guard must never swallow a keystroke the user actually typed.
     // A host that reports the 0xDEADC0DE marker correctly needs no guard for the
     // keys a keyboard can produce, so seeing the marker once hands those back to

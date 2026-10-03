@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <limits>
 #include <string>
@@ -302,13 +303,20 @@ inline constexpr ULONGLONG kSyntheticEditEchoDedupeMs = 40;
 enum class EchoSink { Unspecified, TestKeyDown, KeyDown };
 
 struct SyntheticEditEchoState {
+    // How many replayed keys can be on their way back at once. The paced queue
+    // sends a run of them in one go - a Left and then an Enter the user pressed
+    // while a rewrite waited out its gap - and each must be recognised when it
+    // returns. Holding only the last one let the Left come back as the user's.
+    static constexpr size_t kMaxPendingNativeKeys = 8;
+
     size_t pending_backspaces = 0;
     size_t pending_chars = 0;
-    // A key replayed as its own virtual key rather than as a unicode packet.
-    // Without this the replay would come back, be mistaken for a real press,
-    // and be replayed again - an endless loop, not just a lost character.
+    // Keys replayed as their own virtual key rather than as a unicode packet,
+    // oldest first. Without this a replay would come back, be mistaken for a
+    // real press, and be replayed again - an endless loop, not just a lost
+    // character.
     size_t pending_native_keys = 0;
-    WPARAM native_key = 0;
+    std::array<WPARAM, kMaxPendingNativeKeys> native_keys{};
     ULONGLONG deadline_tick = 0;
     // Set once an injected key comes back carrying the marker: this host does
     // not need the guard, so it is never consulted again.
@@ -337,8 +345,7 @@ struct SyntheticEditEchoState {
         }
         marker_confirmed = true;
         pending_backspaces = 0;
-        pending_native_keys = 0;
-        native_key = 0;
+        ClearNativeKeys();
         if (virtual_key == VK_PACKET && pending_chars > 0) {
             --pending_chars;
         }
@@ -353,8 +360,7 @@ struct SyntheticEditEchoState {
         if (!IsPending(now)) {
             pending_backspaces = 0;
             pending_chars = 0;
-            pending_native_keys = 0;
-            native_key = 0;
+            ClearNativeKeys();
         }
     }
 
@@ -387,10 +393,32 @@ struct SyntheticEditEchoState {
             return;
         }
         DiscardExpired(now);
-        // Only one replayed key is ever in flight; a second one supersedes it.
-        pending_native_keys = 1;
-        native_key = virtual_key;
+        // A run longer than the list keeps the newest keys; the oldest has had
+        // the longest to come back.
+        if (pending_native_keys == kMaxPendingNativeKeys) {
+            RemoveNativeKeyAt(0);
+        }
+        native_keys[pending_native_keys++] = virtual_key;
         deadline_tick = now + window_ms;
+    }
+
+    // Takes back what a SendInput call did not deliver: those keys will never
+    // come back, and counting them would leave the guard armed for keys the
+    // user really presses.
+    void Forget(size_t backspace_count, size_t char_count) noexcept {
+        pending_backspaces -= (std::min)(pending_backspaces, backspace_count);
+        pending_chars -= (std::min)(pending_chars, char_count);
+        SettleDeadline();
+    }
+
+    void ForgetNativeKey(WPARAM virtual_key) noexcept {
+        for (size_t i = pending_native_keys; i > 0; --i) {
+            if (native_keys[i - 1] == virtual_key) {
+                RemoveNativeKeyAt(i - 1);
+                break;
+            }
+        }
+        SettleDeadline();
     }
 
     bool IsPending(ULONGLONG now) const noexcept {
@@ -403,7 +431,7 @@ struct SyntheticEditEchoState {
         if (!IsPending(now)) {
             return false;
         }
-        if (pending_native_keys > 0 && virtual_key == native_key) {
+        if (FindNativeKey(virtual_key) < pending_native_keys) {
             return true;
         }
         if (virtual_key == VK_BACK) {
@@ -439,11 +467,9 @@ struct SyntheticEditEchoState {
         if (!Matches(virtual_key, now)) {
             return false;
         }
-        if (pending_native_keys > 0 && virtual_key == native_key) {
-            --pending_native_keys;
-            if (pending_native_keys == 0) {
-                native_key = 0;
-            }
+        if (const size_t at = FindNativeKey(virtual_key);
+            at < pending_native_keys) {
+            RemoveNativeKeyAt(at);
         } else if (virtual_key == VK_BACK) {
             --pending_backspaces;
         } else {
@@ -467,9 +493,37 @@ struct SyntheticEditEchoState {
     void Clear() noexcept {
         pending_backspaces = 0;
         pending_chars = 0;
-        pending_native_keys = 0;
-        native_key = 0;
+        ClearNativeKeys();
         deadline_tick = 0;
+    }
+
+private:
+    size_t FindNativeKey(WPARAM virtual_key) const noexcept {
+        for (size_t i = 0; i < pending_native_keys; ++i) {
+            if (native_keys[i] == virtual_key) {
+                return i;
+            }
+        }
+        return pending_native_keys;
+    }
+
+    void RemoveNativeKeyAt(size_t at) noexcept {
+        for (size_t i = at; i + 1 < pending_native_keys; ++i) {
+            native_keys[i] = native_keys[i + 1];
+        }
+        native_keys[--pending_native_keys] = 0;
+    }
+
+    void ClearNativeKeys() noexcept {
+        native_keys.fill(0);
+        pending_native_keys = 0;
+    }
+
+    void SettleDeadline() noexcept {
+        if (pending_backspaces == 0 && pending_chars == 0 &&
+            pending_native_keys == 0) {
+            deadline_tick = 0;
+        }
     }
 };
 
