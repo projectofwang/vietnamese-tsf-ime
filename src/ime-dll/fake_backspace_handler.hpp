@@ -83,6 +83,29 @@ size_t BuildSelectionPrefixInputs(
     INPUT* out,
     size_t capacity) noexcept;
 
+// A rewrite queued in MuMu while the text of the word's previous rewrite is
+// still waiting out its gap. None of that text is on screen yet, so the new
+// rewrite's Backspaces take it off first, in the queue, and only the rest of
+// them still has to reach the host. The result is the Backspaces still to send
+// and the text that replaces the waiting text. The screen ends up exactly as
+// sending both rewrites would leave it, with one gap instead of two.
+struct WaitingTextMerge {
+    size_t backspaces = 0;
+    std::wstring text;
+};
+WaitingTextMerge MergeRewriteIntoWaitingText(
+    std::wstring_view waiting,
+    size_t backspace_count,
+    std::wstring_view chars);
+
+// Reads back the characters of a burst made only of unicode packets, as
+// BuildSyntheticEditInputs writes them. False for any other burst.
+bool ReadUnicodeTextBurst(
+    const INPUT* records, size_t count, std::wstring& text);
+
+// A burst of Backspace presses and nothing else.
+bool IsBackspaceBurst(const INPUT* records, size_t count) noexcept;
+
 // Fills `out` with the down/up pair for one virtual key, so a replayed key can
 // join the paced queue instead of jumping ahead of it. `extended` sets
 // KEYEVENTF_EXTENDEDKEY, which arrows and Home/End need.

@@ -150,9 +150,14 @@ LRESULT CALLBACK PointerBoundaryHookProc(
 // position in the queue is what guarantees the host has already consumed the
 // previous key.
 inline constexpr UINT kPacedSyntheticEditDelayMs = 10;
-// Above this many queued keys, pacing has fallen too far behind to be worth it;
-// the remainder goes out in one burst rather than lagging the caret.
-inline constexpr size_t kMaxPacedSyntheticEditInputs = 64;
+// Above this many queued records the timer has stopped keeping up - starved,
+// not just behind - and the remainder goes out in one burst rather than
+// lagging the caret without end. It was 64, 32 keys: a fast typist in MuMu
+// could reach it with a few rewrites in a row, and the burst then had no gap at
+// all. Folding a rewrite into the text still waiting
+// (FoldRewriteIntoWaitingText) keeps one word to a Backspace run and a text
+// run, so this many is several words behind.
+inline constexpr size_t kMaxPacedSyntheticEditInputs = 512;
 // How close is "close together" for the Backspace drop. Comfortably above the
 // gap between two keys of one syllable, far below the pause between words.
 inline constexpr ULONGLONG kSyntheticEditCrowdingWindowMs = 40;
@@ -6943,10 +6948,21 @@ bool VietnameseIME::QueueSyntheticBurst(const INPUT* records, size_t count) {
     if (!records || count == 0) {
         return false;
     }
-    // Drop the part already emitted so the buffer cannot grow without bound.
-    if (paced_group_next_ > 0 && paced_group_next_ == paced_edit_groups_.size()) {
-        paced_edit_inputs_.clear();
-        paced_edit_groups_.clear();
+    // Drop the part already emitted, so the buffer cannot grow without bound
+    // and the limit below counts only what is still to go. Dropped only once
+    // the queue had emptied, sent records piled up under steady typing that
+    // never let it empty, and they alone could reach the limit.
+    if (paced_group_next_ > 0) {
+        SecureZeroMemory(
+            paced_edit_inputs_.data(), paced_edit_next_ * sizeof(INPUT));
+        paced_edit_inputs_.erase(
+            paced_edit_inputs_.begin(),
+            paced_edit_inputs_.begin() +
+                static_cast<std::ptrdiff_t>(paced_edit_next_));
+        paced_edit_groups_.erase(
+            paced_edit_groups_.begin(),
+            paced_edit_groups_.begin() +
+                static_cast<std::ptrdiff_t>(paced_group_next_));
         paced_group_next_ = 0;
         paced_edit_next_ = 0;
     }
@@ -7031,14 +7047,24 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     const bool pace = queued_before ||
                       !SyntheticBurstDue() ||
                       ShouldPaceSyntheticEdit(backspace_count);
-    if (IsAndroidEmulatorHost()) {
+    const bool emulator = IsAndroidEmulatorHost();
+    std::wstring folded_text;
+    size_t folded_bursts = 0;
+    if (queued_before && emulator) {
+        folded_bursts =
+            FoldRewriteIntoWaitingText(backspace_count, chars, folded_text);
+        if (folded_bursts > 0) {
+            chars = folded_text;
+        }
+    }
+    if (emulator) {
         // Counts only, and whether it waited. What was sent, and in what
         // order, is what the next report from MuMu has to be read against.
         logger::LogFormat(
             logger::Level::Info,
-            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d gap_ms=%u",
+            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d folded=%zu gap_ms=%u",
             backspace_count, chars.length(), pace ? 1 : 0,
-            queued_before ? 1 : 0,
+            queued_before ? 1 : 0, folded_bursts,
             static_cast<unsigned>(emulator_backspace_gap_ms_));
     }
     if (!pace) {
@@ -7049,13 +7075,17 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     const size_t required = (backspace_count + chars.length()) * 2;
     if (required == 0 ||
         required > vn_ime::fake_backspace::kMaxSyntheticEditInputs) {
-        return false;
+        // A rewrite that took back exactly the text still waiting leaves
+        // nothing to send, and the queue already holds the result.
+        SecureEraseString(folded_text);
+        return folded_bursts > 0;
     }
 
     INPUT staging[vn_ime::fake_backspace::kMaxSyntheticEditInputs]{};
     const size_t count = vn_ime::fake_backspace::BuildSyntheticEditInputs(
         backspace_count, chars, staging,
         vn_ime::fake_backspace::kMaxSyntheticEditInputs);
+    SecureEraseString(folded_text);
     if (count == 0) {
         SecureZeroMemory(staging, sizeof(staging));
         return false;
@@ -7063,7 +7093,7 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     // Two bursts in the emulator: every Backspace, then all of the text. Only
     // the step from a Backspace to text needs the gap, so a rewrite waits for
     // it once. BuildSyntheticEditInputs puts the Backspaces first.
-    if (IsAndroidEmulatorHost()) {
+    if (emulator) {
         const size_t backspace_records = backspace_count * 2;
         bool queued = false;
         if (backspace_records > 0) {
@@ -7075,7 +7105,7 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
                          count - backspace_records) || queued;
         }
         SecureZeroMemory(staging, sizeof(staging));
-        return queued;
+        return queued || folded_bursts > 0;
     }
     // The old shape emitted one key pair per tick. Keeping that here means a
     // multi-Backspace edit is still spread out for the hosts that need it.
@@ -7085,6 +7115,69 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     }
     SecureZeroMemory(staging, sizeof(staging));
     return queued;
+}
+
+// In MuMu a rewrite's text waits out a gap behind its Backspaces. A quick next
+// rewrite of the same word used to queue a second Backspace run and a second
+// gap behind it, and a long enough backlog overflowed the queue, which then
+// went out in one burst with no gap at all - the very thing the gap is there to
+// prevent (an external review, P2). Text still in the queue is not on screen,
+// so this rewrite's Backspaces take it off there instead
+// (MergeRewriteIntoWaitingText), and any left over join a Backspace run that
+// is itself still waiting right before it. Returns how many text bursts were
+// folded in; `backspace_count` and `text` are then what is left to queue.
+size_t VietnameseIME::FoldRewriteIntoWaitingText(
+    size_t& backspace_count, std::wstring_view chars, std::wstring& text) {
+    namespace fb = vn_ime::fake_backspace;
+    size_t folded = 0;
+    text.assign(chars);
+    std::wstring waiting;
+    while (paced_edit_groups_.size() > paced_group_next_) {
+        const size_t count = paced_edit_groups_.back();
+        const size_t offset = paced_edit_inputs_.size() - count;
+        if (!fb::ReadUnicodeTextBurst(
+                paced_edit_inputs_.data() + offset, count, waiting)) {
+            break;
+        }
+        fb::WaitingTextMerge merge =
+            fb::MergeRewriteIntoWaitingText(waiting, backspace_count, text);
+        SecureEraseString(waiting);
+        if ((merge.backspaces + merge.text.size()) * 2 >
+            fb::kMaxSyntheticEditInputs) {
+            SecureEraseString(merge.text);
+            break;
+        }
+        SecureZeroMemory(
+            paced_edit_inputs_.data() + offset, count * sizeof(INPUT));
+        paced_edit_inputs_.resize(offset);
+        paced_edit_groups_.pop_back();
+        SecureEraseString(text);
+        text = std::move(merge.text);
+        backspace_count = merge.backspaces;
+        ++folded;
+    }
+    if (folded == 0) {
+        SecureEraseString(text);
+        return 0;
+    }
+    if (backspace_count > 0 && paced_edit_groups_.size() > paced_group_next_) {
+        const size_t count = paced_edit_groups_.back();
+        const size_t offset = paced_edit_inputs_.size() - count;
+        if (fb::IsBackspaceBurst(paced_edit_inputs_.data() + offset, count) &&
+            count + backspace_count * 2 <= fb::kMaxSyntheticEditInputs) {
+            INPUT staging[fb::kMaxSyntheticEditInputs]{};
+            const size_t added = fb::BuildSyntheticEditInputs(
+                backspace_count, std::wstring_view{}, staging,
+                std::size(staging));
+            if (added > 0) {
+                paced_edit_inputs_.insert(
+                    paced_edit_inputs_.end(), staging, staging + added);
+                paced_edit_groups_.back() += added;
+                backspace_count = 0;
+            }
+        }
+    }
+    return folded;
 }
 
 // A rewrite in CorelDRAW travels as two bursts, not one. The first carries the

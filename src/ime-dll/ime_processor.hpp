@@ -661,6 +661,8 @@ private:
     bool EnqueuePacedNativeKey(WORD vk);
     bool EnqueuePacedSyntheticEdit(
         size_t backspace_count, std::wstring_view chars);
+    size_t FoldRewriteIntoWaitingText(
+        size_t& backspace_count, std::wstring_view chars, std::wstring& text);
     // Selection replacement, in two halves a timer apart: the Shift+Left run
     // goes out now, the replacement text once the host has had a pump iteration
     // to apply the selection. See BuildSelectionPrefixInputs for the

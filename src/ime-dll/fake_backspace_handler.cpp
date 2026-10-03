@@ -437,6 +437,55 @@ size_t BuildSyntheticEditInputs(
     return index;
 }
 
+WaitingTextMerge MergeRewriteIntoWaitingText(
+    std::wstring_view waiting,
+    size_t backspace_count,
+    std::wstring_view chars) {
+    WaitingTextMerge merge;
+    if (backspace_count <= waiting.size()) {
+        merge.text.reserve(waiting.size() - backspace_count + chars.size());
+        merge.text.append(waiting.substr(0, waiting.size() - backspace_count));
+    } else {
+        merge.backspaces = backspace_count - waiting.size();
+        merge.text.reserve(chars.size());
+    }
+    merge.text.append(chars);
+    return merge;
+}
+
+bool ReadUnicodeTextBurst(
+    const INPUT* records, size_t count, std::wstring& text) {
+    SecureClearString(text);
+    if (!records || count == 0 || count % 2 != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const KEYBDINPUT& key = records[i].ki;
+        const bool up = (key.dwFlags & KEYEVENTF_KEYUP) != 0;
+        if (records[i].type != INPUT_KEYBOARD || key.wVk != 0 ||
+            (key.dwFlags & KEYEVENTF_UNICODE) == 0 || up != (i % 2 == 1)) {
+            SecureClearString(text);
+            return false;
+        }
+        if (!up) {
+            text.push_back(static_cast<wchar_t>(key.wScan));
+        }
+    }
+    return true;
+}
+
+bool IsBackspaceBurst(const INPUT* records, size_t count) noexcept {
+    if (!records || count == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (records[i].type != INPUT_KEYBOARD || records[i].ki.wVk != VK_BACK) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void SendSyntheticEditBatch(
     size_t backspace_count,
     std::wstring_view chars,

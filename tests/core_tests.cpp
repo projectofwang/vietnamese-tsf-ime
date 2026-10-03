@@ -11070,6 +11070,51 @@ void test_fake_backspace_and_coreldraw_compatibility() {
                     "Selection form falls back to Backspace when it will not fit");
     }
 
+    // 5c. MuMu: a rewrite queued while the text of the word's previous one is
+    // still waiting out its gap. "da" then 6 queues one Backspace and "â";
+    // u queues "u" behind it; 1 then asks for two Backspaces and "ấu". None of
+    // the waiting text is on screen, so it is taken off in the queue.
+    {
+        namespace fb = vn_ime::fake_backspace;
+        auto merge = fb::MergeRewriteIntoWaitingText(L"u", 2, L"ấu");
+        assert_true(merge.backspaces == 1 && merge.text == L"ấu",
+                    "Backspaces beyond the waiting text are still to send");
+        merge = fb::MergeRewriteIntoWaitingText(L"â", merge.backspaces, merge.text);
+        assert_true(merge.backspaces == 0 && merge.text == L"ấu",
+                    "Folded through both waiting bursts, the word needs no further Backspace");
+        merge = fb::MergeRewriteIntoWaitingText(L"âu", 0, L"n");
+        assert_true(merge.backspaces == 0 && merge.text == L"âun",
+                    "A plain append joins the waiting text");
+        merge = fb::MergeRewriteIntoWaitingText(L"ab", 2, L"");
+        assert_true(merge.backspaces == 0 && merge.text.empty(),
+                    "Taking back exactly the waiting text leaves nothing to send");
+
+        INPUT text_burst[kBatchCap]{};
+        const size_t text_records = fb::BuildSyntheticEditInputs(
+            0, L"âu", text_burst, kBatchCap);
+        std::wstring read;
+        assert_true(fb::ReadUnicodeTextBurst(text_burst, text_records, read) &&
+                        read == L"âu",
+                    "A text burst reads back as its characters");
+        assert_true(!fb::IsBackspaceBurst(text_burst, text_records),
+                    "A text burst is not a Backspace burst");
+
+        INPUT edit_burst[kBatchCap]{};
+        const size_t edit_records = fb::BuildSyntheticEditInputs(
+            1, L"â", edit_burst, kBatchCap);
+        assert_true(!fb::ReadUnicodeTextBurst(edit_burst, edit_records, read) &&
+                        read.empty(),
+                    "A burst with a Backspace in it is not waiting text");
+        assert_true(fb::IsBackspaceBurst(edit_burst, 2) &&
+                        !fb::IsBackspaceBurst(edit_burst, edit_records),
+                    "Only a run of Backspaces alone is a Backspace burst");
+
+        INPUT key_burst[2]{};
+        assert_true(fb::BuildSyntheticNativeKeyInputs(VK_SPACE, false, key_burst, 2) == 2 &&
+                        !fb::ReadUnicodeTextBurst(key_burst, 2, read),
+                    "A replayed Space is never folded into: the word ended there");
+    }
+
     // 5bis. A rolled onset. Two letters can reach Windows inside one USB
     // polling interval and be expanded in scan order rather than press order,
     // so "thu" typed as one roll arrives as "htu" - and the engine used to
