@@ -807,6 +807,20 @@ HWND GetBestFocusWindow() noexcept {
     return ::GetForegroundWindow();
 }
 
+// The process of the window that keys sent now would reach. SendInput delivers
+// to the focus of the foreground thread, and this thread's own GetFocus() can
+// still name the old window while a switch is under way. 0 when the foreground
+// cannot be read.
+DWORD SendInputTargetProcessId() noexcept {
+    GUITHREADINFO info{};
+    if (!GetForegroundGuiThreadInfo(&info)) return 0;
+    const HWND target = info.hwndFocus ? info.hwndFocus : info.hwndActive;
+    if (!target) return 0;
+    DWORD process_id = 0;
+    ::GetWindowThreadProcessId(target, &process_id);
+    return process_id;
+}
+
 std::wstring GetClassNameOrEmpty(HWND hwnd) {
     if (!hwnd) return L"";
     wchar_t class_name[128] = {0};
@@ -6936,6 +6950,12 @@ bool VietnameseIME::QueueSyntheticBurst(const INPUT* records, size_t count) {
         paced_group_next_ = 0;
         paced_edit_next_ = 0;
     }
+    // The window this queue types into is the one that has the keyboard when
+    // its first burst is queued. Every send checks it again
+    // (PacedEditTargetHasFocus).
+    if (!HasQueuedSyntheticBurst()) {
+        paced_edit_target_process_id_ = SendInputTargetProcessId();
+    }
     paced_edit_inputs_.insert(paced_edit_inputs_.end(), records, records + count);
     paced_edit_groups_.push_back(count);
     if (paced_edit_inputs_.size() > kMaxPacedSyntheticEditInputs) {
@@ -7100,9 +7120,11 @@ bool VietnameseIME::DispatchSplitSelectionReplace(
     return queued;
 }
 
-// Sends everything still queued at once. Used when pacing cannot continue -
-// focus is leaving, the queue grew too long, or no timer could be created.
-// Correctness first: a queued key must never be dropped.
+// Sends everything still queued at once. Used when pacing cannot continue:
+// the input method is switched away, the queue grew too long, or no timer
+// could be created. A queued key is not dropped - unless the keyboard has
+// gone to another application, where it would be typed into the wrong window
+// (PacedEditTargetHasFocus).
 void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
     CancelPacedSyntheticEditTimer();
     if (paced_edit_next_ >= paced_edit_inputs_.size()) {
@@ -7110,6 +7132,11 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
         paced_edit_groups_.clear();
         paced_group_next_ = 0;
         paced_edit_next_ = 0;
+        paced_edit_target_process_id_ = 0;
+        return;
+    }
+    if (!PacedEditTargetHasFocus()) {
+        DropPacedSyntheticEdit(L"the keyboard went to another application");
         return;
     }
     const size_t remaining = paced_edit_inputs_.size() - paced_edit_next_;
@@ -7131,6 +7158,22 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
         logger::LogFormat(
             logger::Level::Warning,
             L"Paced synthetic edit flush sent %u of %zu inputs", sent, remaining);
+        // Counted the way the Begin() above counted them.
+        size_t lost_backspaces = 0;
+        size_t lost_chars = 0;
+        for (size_t i = paced_edit_next_ + sent; i < paced_edit_inputs_.size(); ++i) {
+            if ((paced_edit_inputs_[i].ki.dwFlags & KEYEVENTF_KEYUP) != 0) {
+                continue;
+            }
+            if (paced_edit_inputs_[i].ki.wVk == VK_BACK) {
+                ++lost_backspaces;
+            } else {
+                ++lost_chars;
+            }
+        }
+        synthetic_edit_echo_.Forget(lost_backspaces, lost_chars);
+        ReleaseUndeliveredKeyUp(
+            paced_edit_inputs_.data() + paced_edit_next_, remaining, sent);
     }
     last_burst_tick_ = ::GetTickCount64();
     last_burst_had_backspace_ = backspaces > 0;
@@ -7140,6 +7183,75 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
     paced_edit_groups_.clear();
     paced_group_next_ = 0;
     paced_edit_next_ = 0;
+    paced_edit_target_process_id_ = 0;
+    if (sent != remaining) {
+        EndWordAfterUndeliveredEdit();
+    }
+}
+
+// Whether keys sent now still reach the application this queue was typing
+// into. A queue whose target could not be read when it began, and a moment
+// when the foreground cannot be read, are sent as before.
+bool VietnameseIME::PacedEditTargetHasFocus() const noexcept {
+    if (paced_edit_target_process_id_ == 0) {
+        return true;
+    }
+    const DWORD now = SendInputTargetProcessId();
+    return now == 0 || now == paced_edit_target_process_id_;
+}
+
+// Throws away everything still queued, unsent. Sending it would type it into
+// whatever has the keyboard now: an external review of the MuMu paths found
+// that leaving the window inside the gap put a rewrite's Backspaces in the box
+// the user left and its text in the window they went to. The box keeps the
+// word as far as it got, so the word is ended here and the next key starts a
+// new one rather than rewriting text that is not what the engine holds.
+void VietnameseIME::DropPacedSyntheticEdit(const wchar_t* reason) noexcept {
+    CancelPacedSyntheticEditTimer();
+    const size_t unsent_inputs = paced_edit_next_ < paced_edit_inputs_.size()
+        ? paced_edit_inputs_.size() - paced_edit_next_
+        : 0;
+    const size_t unsent_bursts = paced_group_next_ < paced_edit_groups_.size()
+        ? paced_edit_groups_.size() - paced_group_next_
+        : 0;
+    SecureZeroMemory(
+        paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
+    paced_edit_inputs_.clear();
+    paced_edit_groups_.clear();
+    paced_group_next_ = 0;
+    paced_edit_next_ = 0;
+    paced_edit_target_process_id_ = 0;
+    if (unsent_inputs == 0) {
+        return;
+    }
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"Paced synthetic edit dropped: %zu input(s) in %zu burst(s) not sent (%ls)",
+        unsent_inputs, unsent_bursts, reason ? reason : L"");
+    EndWordAfterUndeliveredEdit();
+}
+
+// The host has less of the word than the engine: part of a rewrite never went
+// out. Nothing that was typed is wrong on screen, but the next rewrite would be
+// worked out from text that is not there.
+void VietnameseIME::EndWordAfterUndeliveredEdit() noexcept {
+    ClearFakeBackspaceResume();
+    EndPassiveWord();
+    ResetDirectInlineState();
+}
+
+// SendInput stops at the first event it cannot insert, and a burst is down/up
+// pairs: when it stops between the two, the key's down went out and its up did
+// not. The up is sent on its own so the key is not left held.
+void VietnameseIME::ReleaseUndeliveredKeyUp(
+    const INPUT* records, size_t count, UINT sent) noexcept {
+    if (!records || sent >= count || sent % 2 == 0 ||
+        (records[sent].ki.dwFlags & KEYEVENTF_KEYUP) == 0) {
+        return;
+    }
+    INPUT key_up = records[sent];
+    ::SendInput(1, &key_up, sizeof(INPUT));
+    SecureZeroMemory(&key_up, sizeof(key_up));
 }
 
 // Emits exactly one burst: the records of one SendInput call, arming the echo
@@ -7151,6 +7263,12 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
     const size_t take = paced_edit_groups_[paced_group_next_];
     if (take == 0 || paced_edit_next_ + take > paced_edit_inputs_.size()) {
         FlushPacedSyntheticEdit();
+        return;
+    }
+    // The gap is long enough for the user to leave the window: a timer that
+    // fires after that must not type the rest of the word into the next one.
+    if (!PacedEditTargetHasFocus()) {
+        DropPacedSyntheticEdit(L"the keyboard went to another application");
         return;
     }
     const INPUT* group = paced_edit_inputs_.data() + paced_edit_next_;
@@ -7166,12 +7284,11 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
             break;
         }
     }
-    if (take == 2 && group[0].ki.wVk != 0 && group[0].ki.wVk != VK_BACK) {
-        synthetic_edit_echo_.BeginNativeKey(group[0].ki.wVk, ::GetTickCount64());
-    } else {
-        size_t keys = 0;
-        size_t packets = 0;
-        for (size_t i = 0; i < take; ++i) {
+    // Counts the downs among group[from..take), for the echo guard.
+    const auto count_downs = [group, take](size_t from, size_t& keys, size_t& packets) {
+        keys = 0;
+        packets = 0;
+        for (size_t i = from; i < take; ++i) {
             if ((group[i].ki.dwFlags & KEYEVENTF_KEYUP) != 0) {
                 continue;
             }
@@ -7181,20 +7298,49 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
                 ++keys;
             }
         }
+    };
+    const bool native_key_replay =
+        take == 2 && group[0].ki.wVk != 0 && group[0].ki.wVk != VK_BACK;
+    if (native_key_replay) {
+        synthetic_edit_echo_.BeginNativeKey(group[0].ki.wVk, ::GetTickCount64());
+    } else {
+        size_t keys = 0;
+        size_t packets = 0;
+        count_downs(0, keys, packets);
         synthetic_edit_echo_.Begin(keys, packets, ::GetTickCount64());
     }
 
     const UINT sent = ::SendInput(
         static_cast<UINT>(take), paced_edit_inputs_.data() + paced_edit_next_,
         sizeof(INPUT));
-    if (sent != take) {
+    const bool delivered = sent == take;
+    if (!delivered) {
         logger::LogFormat(
             logger::Level::Warning,
             L"Paced synthetic edit sent %u of %zu inputs", sent, take);
+        if (native_key_replay) {
+            if (sent == 0) {
+                synthetic_edit_echo_.ForgetNativeKey(group[0].ki.wVk);
+            }
+        } else {
+            size_t lost_keys = 0;
+            size_t lost_packets = 0;
+            count_downs(sent, lost_keys, lost_packets);
+            synthetic_edit_echo_.Forget(lost_keys, lost_packets);
+        }
+        ReleaseUndeliveredKeyUp(group, take, sent);
     }
     paced_edit_next_ += take;
     ++paced_group_next_;
     last_burst_tick_ = ::GetTickCount64();
+
+    // Every burst after this one was worked out from text this one was to
+    // leave on screen. It did not, so they go too, and the word ends.
+    if (!delivered) {
+        DropPacedSyntheticEdit(L"SendInput delivered part of a burst");
+        EndWordAfterUndeliveredEdit();
+        return;
+    }
 
     if (!HasQueuedSyntheticBurst()) {
         SecureZeroMemory(
@@ -10984,7 +11130,9 @@ STDMETHODIMP VietnameseIME::OnKillThreadFocus() {
         // settle now rather than letting the timer fire into a stale document.
         SettleExcelEditEntryResume(excel_edit_entry_resume_context_.Get());
     }
-    FlushPacedSyntheticEdit();
+    // The keyboard has already left this thread, so anything still queued
+    // would go to the window that took it.
+    DropPacedSyntheticEdit(L"thread focus lost");
     synthetic_edit_echo_.Clear();
     // The resume entry means "the user just ended this word and may press
     // Backspace to carry on with it". Leaving the application ends that

@@ -679,6 +679,11 @@ private:
     void PumpSyntheticBursts() noexcept;
     void FlushPacedSyntheticEdit() noexcept;
     void EmitNextPacedSyntheticKey() noexcept;
+    bool PacedEditTargetHasFocus() const noexcept;
+    void DropPacedSyntheticEdit(const wchar_t* reason) noexcept;
+    void EndWordAfterUndeliveredEdit() noexcept;
+    static void ReleaseUndeliveredKeyUp(
+        const INPUT* records, size_t count, UINT sent) noexcept;
     bool ArmPacedSyntheticEditTimer(UINT delay_ms) noexcept;
     void CancelPacedSyntheticEditTimer() noexcept;
     static VOID CALLBACK PacedSyntheticEditTimerProc(
@@ -789,6 +794,9 @@ private:
     // burst at paced_group_next_.
     std::vector<size_t> paced_edit_groups_;
     size_t paced_group_next_ = 0;
+    // The process whose window had the keyboard when the queue's first burst
+    // went in, or 0 if that could not be read. See PacedEditTargetHasFocus.
+    DWORD paced_edit_target_process_id_ = 0;
     // When the last burst actually went out, so the next one can hold back
     // until the host has had its gap.
     ULONGLONG last_burst_tick_ = 0;
