@@ -3957,7 +3957,13 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
 
 // ITfKeyEventSink Implementation
 STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
-    logger::LogFormat(logger::Level::Info, L"OnSetFocus called: fForeground = %s", fForeground ? L"TRUE" : L"FALSE");
+    // inline= is how many characters of a word typed without a composition
+    // were open when the focus moved; queued= the bursts still waiting to go.
+    logger::LogFormat(
+        logger::Level::Info,
+        L"OnSetFocus called: fForeground = %s, inline=%zu, queued=%zu",
+        fForeground ? L"TRUE" : L"FALSE", direct_inline_display_length_,
+        paced_edit_groups_.size() - (std::min)(paced_group_next_, paced_edit_groups_.size()));
     if (fForeground) {
         EnsureInkscapeSubclassed();
         if (IsBrowserProcess()) {
@@ -10903,12 +10909,16 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
             pdmFocus != nullptr,
             pdmFocus && pdmPrevFocus && IsSameComObject(pdmFocus, pdmPrevFocus),
             focus_holds_composition || passive_word_active_);
+    // inline= is the word typed without a composition that a focus change
+    // here clears: a MuMu report of "dấu" coming out "da6u1" reads as that
+    // word lost between two keys, and this says whether a focus change did it.
     logger::LogFormat(
         logger::Level::Info,
         L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d "
-        L"stays=%d class=%ls fake_bs=%d excel=%d",
+        L"stays=%d inline=%zu class=%ls fake_bs=%d excel=%d",
         pdmFocus ? 1 : 0, pdmPrevFocus ? 1 : 0,
         HasActiveComposition() ? 1 : 0, focus_stays ? 1 : 0,
+        direct_inline_display_length_,
         GetClassNameOrEmpty(focus_hwnd).c_str(),
         IsFakeBackspaceApp() ? 1 : 0, IsExcelApp() ? 1 : 0);
     if (focus_stays) {
@@ -11216,7 +11226,9 @@ STDMETHODIMP VietnameseIME::OnSetThreadFocus() {
 }
 
 STDMETHODIMP VietnameseIME::OnKillThreadFocus() {
-    logger::Log(logger::Level::Info, L"OnKillThreadFocus called.");
+    logger::LogFormat(
+        logger::Level::Info, L"OnKillThreadFocus called: inline=%zu",
+        direct_inline_display_length_);
     ClearExcelNativePrefix(L"thread focus lost");
     if (HasPendingExcelEditEntryResume()) {
         // The cell is losing focus with characters possibly already erased;
