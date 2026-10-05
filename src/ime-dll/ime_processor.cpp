@@ -6185,8 +6185,10 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
     }
     // Measured rather than listed: this surface was asked where its
     // composition was and could not say, twice running. See
-    // NoteCompositionPlacement.
-    if (host_cannot_place_composition_) {
+    // NoteCompositionPlacement. From the next word: the one being composed
+    // is finished as a composition.
+    if (ShouldTypeUnplaceableSurfaceSynthetically(
+            host_cannot_place_composition_, HasActiveComposition())) {
         return true;
     }
     return IsConsoleProcess() ||
@@ -11416,6 +11418,13 @@ void VietnameseIME::NoteCompositionPlacement(
     TfEditCookie ec, ITfContext* pic, ITfRange* range) {
     if (!pic || !range || host_cannot_place_composition_ ||
         !enable_auto_synthetic_fallback_) {
+        return;
+    }
+    // Chromium answers "not laid out yet" here while it draws the composition
+    // itself (IsChromiumWindowClassName). In Zalo, a WebView2 app, that sent
+    // the surface over to synthetic keys after nearly every focus change.
+    if (vn_ime::IsChromiumWindowClassName(
+            GetClassNameOrEmpty(GetBestFocusWindow()))) {
         return;
     }
 

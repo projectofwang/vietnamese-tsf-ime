@@ -1218,6 +1218,22 @@ void test_browser_url_native_reconversion_policy() {
             !vn_ime::IsFocusStayingOnDocument(false, true, true),
         "Focus back on the same document, or on the one holding the open composition, is no focus change");
 
+    // Zalo (WebView2): after each message the focus moved, the first word was
+    // measured again, Chromium said "not laid out yet" twice, and the surface
+    // went over to synthetic keys in the middle of that word. The next key -
+    // the tone of "có" - committed "co" and reached the chat as "1".
+    assert_true(
+        vn_ime::IsChromiumWindowClassName(L"Chrome_WidgetWin_1") &&
+            !vn_ime::IsChromiumWindowClassName(L"Chrome_WidgetWin_0") &&
+            !vn_ime::IsChromiumWindowClassName(L"gdkWindowToplevel") &&
+            !vn_ime::IsChromiumWindowClassName(L""),
+        "Chromium's window class is told apart from others");
+    assert_true(
+        vn_ime::ShouldTypeUnplaceableSurfaceSynthetically(true, false) &&
+            !vn_ime::ShouldTypeUnplaceableSurfaceSynthetically(true, true) &&
+            !vn_ime::ShouldTypeUnplaceableSurfaceSynthetically(false, false),
+        "A surface that cannot place a composition types synthetically from the next word, not under the open one");
+
     const auto no_scope_check =
         vn_ime::DecideBrowserInputScopeCheck(
             false, false, false, false);

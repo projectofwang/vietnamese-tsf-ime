@@ -16,6 +16,29 @@ inline constexpr bool IsBrowserExecutableName(
            process_name.contains(L"vivaldi");
 }
 
+// Chromium's window class: browsers, and every app built on Chromium -
+// Electron, CEF, Edge WebView2. Both Zalo builds are among them. Chromium
+// draws its own composition in the page. Until its renderer has laid the text
+// out, it answers GetTextExt with TS_E_NOLAYOUT or an empty rectangle, which
+// is not the "nobody can say where the text is" that NoteCompositionPlacement
+// looks for.
+inline constexpr bool IsChromiumWindowClassName(
+    std::wstring_view class_name) noexcept {
+    return class_name == L"Chrome_WidgetWin_1";
+}
+
+// A surface measured unable to place a composition goes over to synthetic keys
+// from the next word on. The word being composed when that was found is
+// finished as a composition. Switching under it handed the next key to the
+// synthetic path with a composition still open, and that path commits the
+// composition and gives the key to the host as typed. In Zalo, "co" and then 1
+// came out "co1", and "để" came out "d9e63". Once a digit is in the word,
+// nothing after it is Vietnamese.
+inline constexpr bool ShouldTypeUnplaceableSurfaceSynthetically(
+    bool cannot_place_composition, bool composing) noexcept {
+    return cannot_place_composition && !composing;
+}
+
 inline constexpr bool IsWebRichTextHostExecutableName(
     std::wstring_view process_name) noexcept {
     return IsBrowserExecutableName(process_name) ||
