@@ -872,6 +872,21 @@ bool IsVbaEditorWindow(HWND hwnd) {
     return WindowOrAncestorHasClass(hwnd, L"wndclass_desked_gsk");
 }
 
+// Office's own command surfaces (the ribbon, task panes) are NetUI, and their
+// text boxes sit under NetUIHWND:
+//
+//   font box     RICHEDIT60W < NetUICtrlNotifySink < NetUIHWND < NUIPane
+//                  < MsoWorkPane < MsoCommandBar < EXCEL2 < XLMAIN
+//   cell editor  EXCEL6 < XLDESK < XLMAIN
+//
+// Not a cell either. Excel's font box completes a font name as it is typed:
+// "t" became "Times New Roman" with "imes New Roman" selected. The cell-entry
+// handshake's Backspace then took the selection rather than the "t", so "tim"
+// came out "Ttim".
+bool IsOfficeNetUiWindow(HWND hwnd) {
+    return WindowOrAncestorHasClass(hwnd, L"NetUIHWND");
+}
+
 bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
     if (!hwnd) return false;
 
@@ -8202,10 +8217,12 @@ bool VietnameseIME::IsExcelApp() const {
         !vn_ime::fake_backspace::IsExcelProcess(GetFocusedProcessName())) {
         return false;
     }
-    // In the process, but not in the spreadsheet: see IsVbaEditorWindow. Every
-    // caller of this asks it to decide how to type into a cell, so the editor
-    // has to answer no rather than have each of them learn about it.
-    return !IsVbaEditorWindow(GetBestFocusWindow());
+    // In the process, but not in the spreadsheet: see IsVbaEditorWindow and
+    // IsOfficeNetUiWindow. Every caller of this asks it to decide how to type
+    // into a cell, so those have to answer no rather than have each caller
+    // learn about them.
+    const HWND focus = GetBestFocusWindow();
+    return !IsVbaEditorWindow(focus) && !IsOfficeNetUiWindow(focus);
 }
 
 bool VietnameseIME::IsOutlookApp() const {
