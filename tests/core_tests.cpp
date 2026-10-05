@@ -6770,6 +6770,33 @@ void test_excel_host_types_first_char() {
     // AutoComplete suggestion it invites - is not worth its risk.
     assert_true(!hand_over(true, false, false, false, true, 0),
                 "An open cell editor keeps the first character in-house");
+
+    // Office's font box suggests a font as it is typed into, from text it
+    // holds itself. Keys spelled as typed go to it; the first one that changes
+    // the word takes it back. "tim" gave "Ttim" when a lone Backspace took the
+    // suggestion instead of the "t".
+    using vn_ime::core::CompletingBoxKey;
+    using vn_ime::core::DecideCompletingBoxKey;
+    assert_true(DecideCompletingBoxKey(true, false, 0, 64, true) ==
+                    CompletingBoxKey::HostTypes,
+                "The first letter of a word goes to the box so it can suggest");
+    assert_true(DecideCompletingBoxKey(true, false, 2, 64, true) ==
+                    CompletingBoxKey::HostTypes,
+                "So does every letter after it while the word is spelled by its keys");
+    assert_true(DecideCompletingBoxKey(true, false, 2, 64, false) ==
+                    CompletingBoxKey::TakeOver,
+                "A mark or tone takes the word back from the box");
+    assert_true(DecideCompletingBoxKey(true, false, 0, 64, false) ==
+                    CompletingBoxKey::Ordinary,
+                "A word that changes on its first key has nothing to take back");
+    assert_true(DecideCompletingBoxKey(true, false, 64, 64, true) ==
+                    CompletingBoxKey::Ordinary,
+                "A word past the limit is left to the host as typed");
+    assert_true(DecideCompletingBoxKey(false, false, 2, 64, true) ==
+                    CompletingBoxKey::Ordinary &&
+                    DecideCompletingBoxKey(true, true, 0, 64, true) ==
+                    CompletingBoxKey::Ordinary,
+                "Neither a key that cannot be in a word nor an open composition is handed over");
 }
 
 void test_dialog_vertical_fit_policy() {

@@ -887,6 +887,27 @@ bool IsOfficeNetUiWindow(HWND hwnd) {
     return WindowOrAncestorHasClass(hwnd, L"NetUIHWND");
 }
 
+// Whether a Delete sent ahead of taking a word back from a completing box can
+// only remove a suggestion. Either the box has text selected - its suggestion,
+// after the caret - or the caret is at the end, where nothing else stands and
+// a suggestion still on its way is where it will land. With the caret in the
+// middle of text and nothing selected, a Delete would eat a character of the
+// user's, so none is sent.
+bool DeleteClearsOnlySuggestion(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+    DWORD start = 0;
+    DWORD end = 0;
+    ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&start),
+                   reinterpret_cast<LPARAM>(&end));
+    if (start != end) {
+        return true;
+    }
+    const int length = ::GetWindowTextLengthW(hwnd);
+    return length >= 0 && end == static_cast<DWORD>(length);
+}
+
 bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
     if (!hwnd) return false;
 
@@ -4437,7 +4458,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // OnKeyDown can still return pfEaten=FALSE so the host receives the key.
     *pfEaten = (decision.eat || decision.commit_existing_before_host) ? TRUE : FALSE;
 
-    if (IsExcelApp()) {
+    if (IsExcelApp() || IsCompletingTextBox()) {
         // Only this sink runs for a key the host is given, so the hand-over is
         // recorded here rather than in OnKeyDown.
         NoteExcelNativePrefixKey(decision, *pfEaten != FALSE);
@@ -5031,7 +5052,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     // Any key but the one that takes them over ends the life of the characters
     // Excel was left to type; they simply stay in the cell as plain text.
-    if (IsExcelApp() &&
+    if ((IsExcelApp() || IsCompletingTextBox()) &&
         decision.action != KeyAction::ExcelAdoptNativePrefix &&
         decision.action != KeyAction::ExcelHostTypesFirstChar) {
         ClearExcelNativePrefix(L"next key");
@@ -5953,6 +5974,33 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     const bool is_composition_key =
         IsValidCompositionKey(wParam, engine_.GetInputMethod());
 
+    // Office's font box suggests a font as it is typed into, but only from
+    // text it holds: a word composed here showed no suggestion until it was
+    // committed. Keys still spelled as typed go to the box itself; the first
+    // one that changes the word takes it back with the Excel hand-over below
+    // (AdoptExcelNativePrefix), which clears the suggestion first.
+    if (is_composition_key && IsCompletingTextBox() &&
+        !HasPendingExcelEditEntryResume() && !HasDirectInlineState()) {
+        std::wstring keys = excel_native_prefix_keys_;
+        keys.push_back(decision.ch);
+        const bool spelled = SpelledByItsKeys(keys);
+        SecureEraseString(keys);
+        switch (core::DecideCompletingBoxKey(
+                    is_composition_key, has_composition,
+                    excel_native_prefix_keys_.length(),
+                    kMaxExcelEditEntryResumeChars, spelled)) {
+            case core::CompletingBoxKey::HostTypes:
+                decision.action = KeyAction::ExcelHostTypesFirstChar;
+                return decision;
+            case core::CompletingBoxKey::TakeOver:
+                decision.eat = true;
+                decision.action = KeyAction::ExcelAdoptNativePrefix;
+                return decision;
+            case core::CompletingBoxKey::Ordinary:
+                break;
+        }
+    }
+
     // Excel builds its in-cell editor around the first character of a cell and
     // moves that character into it on its own schedule, which no message this
     // service can see announces. A composition started for that character is
@@ -6333,17 +6381,25 @@ void VietnameseIME::ClearExcelNativePrefix(const wchar_t* reason) noexcept {
 void VietnameseIME::NoteExcelNativePrefixKey(const KeyDecision& decision,
                                              bool eaten) {
     if (decision.action == KeyAction::ExcelHostTypesFirstChar) {
-        SecureEraseString(excel_native_prefix_keys_);
-        excel_native_prefix_keys_.assign(1, decision.ch);
+        // A cell hands over one character, a completing box every key of a
+        // word still spelled as typed (IsCompletingTextBox).
+        excel_native_prefix_keys_.push_back(decision.ch);
         excel_native_prefix_tick_ = ::GetTickCount64();
         excel_native_prefix_opened_editor_ = false;
-        // The host puts exactly one character in the cell, and until the next
-        // key takes it into a composition it is ordinary cell text - which is
-        // what decides whether '=' still opens a formula.
-        ++excel_cell_chars_;
-        logger::Log(
-            logger::Level::Info,
-            L"Excel cell entry: the host types the first character itself");
+        if (IsExcelApp()) {
+            // The host puts exactly one character in the cell, and until the
+            // next key takes it into a composition it is ordinary cell text -
+            // which is what decides whether '=' still opens a formula.
+            ++excel_cell_chars_;
+            logger::Log(
+                logger::Level::Info,
+                L"Excel cell entry: the host types the first character itself");
+        } else {
+            logger::LogFormat(
+                logger::Level::Info,
+                L"Completing box: the host types the word's key %zu",
+                excel_native_prefix_keys_.length());
+        }
         return;
     }
     if (!eaten && !decision.is_modifier) {
@@ -6370,15 +6426,22 @@ bool VietnameseIME::AdoptExcelNativePrefix(ITfContext* pic, wchar_t ch) {
     // reports an empty selection whatever the cell holds, the same way it
     // reports empty text. What it does show is that it opened the cell editor
     // for the handed-over character, and that says the cell was empty a
-    // keystroke ago: whatever now sits after the caret came from Excel.
-    const bool host_selection = excel_native_prefix_opened_editor_;
+    // keystroke ago: whatever now sits after the caret came from Excel. A
+    // completing box is a rich edit control and can simply be asked.
+    const bool completing_box = IsCompletingTextBox();
+    const bool host_selection = completing_box
+        ? DeleteClearsOnlySuggestion(GetBestFocusWindow())
+        : excel_native_prefix_opened_editor_;
 
     std::wstring raw = excel_native_prefix_keys_;
     raw.push_back(ch);
     // Those characters are about to leave the cell and become the composition,
     // so they stop counting as text the caret sits behind.
-    excel_cell_chars_ =
-        excel_cell_chars_ > erase_chars ? excel_cell_chars_ - erase_chars : 0;
+    if (!completing_box) {
+        excel_cell_chars_ = excel_cell_chars_ > erase_chars
+            ? excel_cell_chars_ - erase_chars
+            : 0;
+    }
     ClearExcelNativePrefix(nullptr);
 
     // The word so far, as the host's characters plus this key would spell it.
@@ -6808,6 +6871,9 @@ void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
     // cannot describe. This runs for composition hosts too, so it sits ahead of
     // the inline-only bail-out below.
     typed_context_.ObserveCaretJump();
+    // Characters left for the host to type are no longer right behind the
+    // caret, so taking them back would erase whatever is there now.
+    ClearExcelNativePrefix(L"pointer click");
     // A word kept for Space-then-Backspace sits behind the caret no more, and
     // a passive word (BeginPassiveWord) is over: either one reopened after a
     // click would rewrite text wherever the click put the caret.
@@ -8223,6 +8289,23 @@ bool VietnameseIME::IsExcelApp() const {
     // learn about them.
     const HWND focus = GetBestFocusWindow();
     return !IsVbaEditorWindow(focus) && !IsOfficeNetUiWindow(focus);
+}
+
+bool VietnameseIME::IsCompletingTextBox() const {
+    return IsOfficeNetUiWindow(GetBestFocusWindow());
+}
+
+bool VietnameseIME::SpelledByItsKeys(std::wstring_view keys) {
+    // Only asked with no word in flight, so the engine is free to borrow.
+    engine_.Clear();
+    for (const wchar_t key : keys) {
+        engine_.ProcessKey(key);
+    }
+    std::wstring display = engine_.GetDisplayString();
+    engine_.Clear();
+    const bool spelled = display == keys;
+    SecureEraseString(display);
+    return spelled;
 }
 
 bool VietnameseIME::IsOutlookApp() const {
@@ -10982,7 +11065,9 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     // user leaving the cell, and that character stays behind in it.
     if (!excel_native_prefix_keys_.empty()) {
         const ULONGLONG now = ::GetTickCount64();
-        if (now < excel_native_prefix_tick_ ||
+        // Only a switch into the spreadsheet can be Excel opening its cell
+        // editor; one into or out of a completing box is the user moving on.
+        if (!IsExcelApp() || now < excel_native_prefix_tick_ ||
             now - excel_native_prefix_tick_ >
                 kExcelNativePrefixSwitchGraceMs) {
             ClearExcelNativePrefix(L"focus moved on");

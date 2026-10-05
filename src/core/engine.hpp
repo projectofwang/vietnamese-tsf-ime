@@ -520,4 +520,27 @@ bool ShouldReenterExcelQuotedTextOnBackspace(
     bool has_closed_quote,
     size_t formula_chars_after_closed_quote) noexcept;
 
+// A key in a text box that completes what is typed into it, Office's font box
+// among them: "t" brings up "Times New Roman" with the rest selected, and the
+// box only suggests from text it holds itself.
+//
+// While the word is still spelled exactly by its keys, the host types each key
+// (HostTypes) and the box suggests as it goes. The first key that changes the
+// word - a mark, a tone - takes it over (TakeOver): the suggestion and the
+// host's characters come off, and the word carries on as a composition.
+// Anything else goes the ordinary way. A word the host typed that has run past
+// `max_host_typed` is left to the host as typed.
+enum class CompletingBoxKey : unsigned char {
+    Ordinary,
+    HostTypes,
+    TakeOver,
+};
+
+CompletingBoxKey DecideCompletingBoxKey(
+    bool is_composition_key,
+    bool has_composition,
+    size_t host_typed_chars,
+    size_t max_host_typed,
+    bool spelled_by_keys) noexcept;
+
 } // namespace vn_ime::core

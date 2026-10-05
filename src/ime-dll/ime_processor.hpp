@@ -521,6 +521,11 @@ private:
         ITfContext* pic) const noexcept;
     bool EnsureBrowserInputScopeCheckedForTextKey(ITfContext* pic);
     bool IsExcelApp() const;
+    // A text box that suggests as it is typed into: Office's NetUI boxes, the
+    // font box among them. See core::DecideCompletingBoxKey.
+    bool IsCompletingTextBox() const;
+    // Whether `keys`, run through the engine, come out exactly as typed.
+    bool SpelledByItsKeys(std::wstring_view keys);
     bool IsOutlookApp() const;
     bool IsLibreOfficeApp() const;
     std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);

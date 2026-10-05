@@ -3456,6 +3456,24 @@ bool ShouldReenterExcelQuotedTextOnBackspace(
     return has_closed_quote && formula_chars_after_closed_quote == 0;
 }
 
+CompletingBoxKey DecideCompletingBoxKey(
+    bool is_composition_key,
+    bool has_composition,
+    size_t host_typed_chars,
+    size_t max_host_typed,
+    bool spelled_by_keys) noexcept {
+    if (!is_composition_key || has_composition) {
+        return CompletingBoxKey::Ordinary;
+    }
+    if (spelled_by_keys) {
+        return host_typed_chars < max_host_typed
+            ? CompletingBoxKey::HostTypes
+            : CompletingBoxKey::Ordinary;
+    }
+    return host_typed_chars > 0 ? CompletingBoxKey::TakeOver
+                                : CompletingBoxKey::Ordinary;
+}
+
 bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
     if (host_text.empty() || raw_keys_.empty()) {
         return false;
