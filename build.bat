@@ -23,6 +23,21 @@ if not "%~1"=="" if /I not "%~1"=="arm64" (
 )
 
 if not defined OUT_DIR set "OUT_DIR=build"
+
+:: The numbers of neokey_config.exe's version resource, from VERSION:
+:: "0.1.20-dev" gives 0, 1 and 20.
+set "VER_MAJOR=0"
+set "VER_MINOR=0"
+set "VER_PATCH=0"
+if exist "%~dp0VERSION" (
+    for /f "usebackq tokens=1-3 delims=.-+ " %%a in ("%~dp0VERSION") do (
+        set "VER_MAJOR=%%a"
+        set "VER_MINOR=%%b"
+        set "VER_PATCH=%%c"
+    )
+)
+set "RC_VERSION=/d NEOKEY_VERSION_MAJOR=!VER_MAJOR! /d NEOKEY_VERSION_MINOR=!VER_MINOR! /d NEOKEY_VERSION_PATCH=!VER_PATCH!"
+
 if /I "%~1"=="arm64" goto build_arm64
 
 set "OBJ_X64=!OUT_DIR!\x64"
@@ -41,7 +56,7 @@ del /q *.obj "!OUT_DIR!\*.obj" "!OUT_DIR!\*.lib" "!OUT_DIR!\*.exp" 2>nul
 echo =========================================
 echo Building 64-bit components...
 echo =========================================
-cmd.exe /c "call "!VCVARS!" amd64 && rc.exe /nologo /c65001 /fo !OUT_DIR!\resources.res /i src\config-app src\config-app\resources.rc"
+cmd.exe /c "call "!VCVARS!" amd64 && rc.exe /nologo /c65001 !RC_VERSION! /fo !OUT_DIR!\resources.res /i src\config-app src\config-app\resources.rc"
 if errorlevel 1 exit /b 1
 
 cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\free_typing.cpp src\core\free_typing_repair.cpp src\core\speller.cpp src\core\fuzzy_input.cpp src\shared\logger.cpp src\shared\tray_ipc.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
@@ -82,7 +97,7 @@ del /q *.obj "!OUT_DIR!\*.obj" "!OUT_DIR!\*.lib" "!OUT_DIR!\*.exp" 2>nul
 echo =========================================
 echo Building ARM64 preview components...
 echo =========================================
-cmd.exe /c "call "!VCVARS!" amd64_arm64 && rc.exe /nologo /c65001 /fo !OUT_DIR!\resources_arm64.res /i src\config-app src\config-app\resources.rc"
+cmd.exe /c "call "!VCVARS!" amd64_arm64 && rc.exe /nologo /c65001 !RC_VERSION! /fo !OUT_DIR!\resources_arm64.res /i src\config-app src\config-app\resources.rc"
 if errorlevel 1 exit /b 1
 
 cmd.exe /c "call "!VCVARS!" amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_ARM64!\\" /Fe!OUT_DIR!\neokey_arm64.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\free_typing.cpp src\core\free_typing_repair.cpp src\core\speller.cpp src\core\fuzzy_input.cpp src\shared\logger.cpp src\shared\tray_ipc.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"

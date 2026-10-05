@@ -1,6 +1,12 @@
 VS_PATH = $(shell "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath)
 VCVARS = "$(VS_PATH)\VC\Auxiliary\Build\vcvarsall.bat"
 
+# The numbers of neokey_config.exe's version resource, from VERSION:
+# "0.1.20-dev" gives 0, 1 and 20 (see resources.rc).
+VERSION_TEXT := $(strip $(file < VERSION))
+VERSION_PARTS := $(subst ., ,$(firstword $(subst -, ,$(subst +, ,$(VERSION_TEXT)))))
+RC_VERSION = /d NEOKEY_VERSION_MAJOR=$(or $(word 1,$(VERSION_PARTS)),0) /d NEOKEY_VERSION_MINOR=$(or $(word 2,$(VERSION_PARTS)),0) /d NEOKEY_VERSION_PATCH=$(or $(word 3,$(VERSION_PARTS)),0)
+
 OUT_DIR = build
 TARGET_X64 = $(OUT_DIR)/neokey.dll
 TARGET_X86 = $(OUT_DIR)/neokey32.dll
@@ -79,13 +85,13 @@ $(CONFIG_TARGET_ARM64): $(CONFIG_SOURCES) $(OUT_DIR)/resources_arm64.res
 	@if not exist "$(OBJ_CONFIG_ARM64)" mkdir "$(OBJ_CONFIG_ARM64)"
 	cmd.exe /c "call $(VCVARS) amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 $(HARDEN_FLAGS) /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo$(OBJ_CONFIG_ARM64)\\ /Fe$(CONFIG_TARGET_ARM64) $(CONFIG_SOURCES) $(OUT_DIR)/resources_arm64.res /link /subsystem:windows $(CONFIG_LIBS) $(HARDEN_LINK_FLAGS)"
 
-$(OUT_DIR)/resources.res: src/config-app/resources.rc src/config-app/resources.h src/config-app/manifest.xml
+$(OUT_DIR)/resources.res: src/config-app/resources.rc src/config-app/resources.h src/config-app/manifest.xml VERSION
 	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"
-	cmd.exe /c "call $(VCVARS) amd64 && rc.exe /nologo /c65001 /fo $(OUT_DIR)/resources.res /i src/config-app src/config-app/resources.rc"
+	cmd.exe /c "call $(VCVARS) amd64 && rc.exe /nologo /c65001 $(RC_VERSION) /fo $(OUT_DIR)/resources.res /i src/config-app src/config-app/resources.rc"
 
-$(OUT_DIR)/resources_arm64.res: src/config-app/resources.rc src/config-app/resources.h src/config-app/manifest.xml
+$(OUT_DIR)/resources_arm64.res: src/config-app/resources.rc src/config-app/resources.h src/config-app/manifest.xml VERSION
 	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"
-	cmd.exe /c "call $(VCVARS) amd64_arm64 && rc.exe /nologo /c65001 /fo $(OUT_DIR)/resources_arm64.res /i src/config-app src/config-app/resources.rc"
+	cmd.exe /c "call $(VCVARS) amd64_arm64 && rc.exe /nologo /c65001 $(RC_VERSION) /fo $(OUT_DIR)/resources_arm64.res /i src/config-app src/config-app/resources.rc"
 
 tests: $(TEST_TARGET) $(TEST_TARGET_X86) $(SETUP_TEST_TARGET)
 

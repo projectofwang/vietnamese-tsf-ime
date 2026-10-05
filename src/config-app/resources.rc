@@ -9,6 +9,57 @@ IDI_APP_ICON ICON "neokey.ico"
 IDI_TRAY_V_ICON ICON "neokey_tray_v.ico"
 IDI_TRAY_E_ICON ICON "neokey_tray_e.ico"
 
+// Version information. FileDescription is the name Windows gives this program
+// wherever it lists programs by their file. Without it, the taskbar's list of
+// notification-area icons read "neokey_config.exe" above each "Neokey 0.1.19".
+// The numbers come from VERSION, passed in by build.bat and the Makefile. A
+// pre-release tag such as "-dev" has no place in them, so it is left off.
+#ifndef NEOKEY_VERSION_MAJOR
+#define NEOKEY_VERSION_MAJOR 0
+#endif
+#ifndef NEOKEY_VERSION_MINOR
+#define NEOKEY_VERSION_MINOR 0
+#endif
+#ifndef NEOKEY_VERSION_PATCH
+#define NEOKEY_VERSION_PATCH 0
+#endif
+// FileVersion as text as well: without it .NET's FileVersionInfo, and what
+// reads the block the same way, takes the string table for absent and reports
+// every string in it empty.
+#define NEOKEY_STRINGIZE2(x) #x
+#define NEOKEY_STRINGIZE(x) NEOKEY_STRINGIZE2(x)
+#define NEOKEY_VERSION_STRING NEOKEY_STRINGIZE(NEOKEY_VERSION_MAJOR) "." \
+    NEOKEY_STRINGIZE(NEOKEY_VERSION_MINOR) "." \
+    NEOKEY_STRINGIZE(NEOKEY_VERSION_PATCH)
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION NEOKEY_VERSION_MAJOR,NEOKEY_VERSION_MINOR,NEOKEY_VERSION_PATCH,0
+ PRODUCTVERSION NEOKEY_VERSION_MAJOR,NEOKEY_VERSION_MINOR,NEOKEY_VERSION_PATCH,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "Neokey"
+            VALUE "FileVersion", NEOKEY_VERSION_STRING
+            VALUE "ProductName", "Neokey"
+            VALUE "ProductVersion", NEOKEY_VERSION_STRING
+            VALUE "InternalName", "neokey_config"
+            VALUE "OriginalFilename", "neokey_config.exe"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Hoang Linh"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
 // Dialog template
 //
 // WS_EX_COMPOSITED double-buffers the window and its children: the erase and
